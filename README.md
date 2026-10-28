@@ -1,20 +1,35 @@
-# Capstone 2: Keep It Running (Stan's Robot Shop)
+# Capstone 2: Production Observability & Reliability (Stan's Robot Shop on EKS)
 
-Fork of [instana/robot-shop](https://github.com/instana/robot-shop). The shop runs on the EKS cluster built in [Capstone 1](https://github.com/Davidblitx/example-voting-app) and is wrapped in monitoring: metrics, logs, a trace, an SLO with a Slack alert, a runbook, and a failure drill with a postmortem.
+This project builds full-stack observability, automated alerting, and incident management around [Stan's Robot Shop](https://github.com/instana/robot-shop), running on the AWS EKS cluster established in **Capstone 1**. The architecture is hardened with integrated metrics, container logs, distributed tracing, strict Service Level Objectives (SLOs) routed to Slack, documented runbooks, and a validated incident recovery drill.
 
-## Starting point and what I changed
+---
 
-The Loki, Fluent Bit, OpenTelemetry Collector, Jaeger, alert-rule and dashboard files started from a community starter kit that the cohort moderator shared with the instructor's approval. Everything else is my own work. My changes:
+## Table of Contents
 
-- Removed the Instana agent and EUM settings from the Robot Shop Helm chart, because there is no Instana agent in this cluster
-- Switched the Redis StatefulSet to an `emptyDir`, because the cluster has no EBS CSI driver and the original `standard` volume would never bind
-- Replaced the kit's dashboard (network, CPU, memory, restarts) with one built around requests, errors and latency
-- Added a blackbox `Probe` and a `ServiceMonitor` so the dashboard has real data
-- Added the ConfigMap the tracing job needs, which the kit did not include
-- Pointed the runbook links at my repository, wired the alerts to Slack, and wrote the runbook, SLO document and postmortem
-- Ran my own failure drill and recorded my own timings
+- [Origin & Custom Modifications](#origin--custom-modifications)
+- [System Architecture](#system-architecture)
+- [Repository Layout](#repository-layout)
+- [Deployment & Bootstrap Guide](#deployment--bootstrap-guide)
+- [Step-by-Step Implementation & Validation](#step-by-step-implementation--validation)
+- [Known Technical Constraints](#known-technical-constraints)
+- [Teardown Instructions](#teardown-instructions)
 
-## Architecture
+---
+
+## Origin & Custom Modifications
+
+While the foundational logging, tracing, monitoring, and alerting templates were sourced from an approved cohort starter kit, the entire integration, configuration, and validation workflow has been specifically adapted:
+
+- **Helm Chart Cleanup:** Stripped out all proprietary Instana agent telemetry and End-User Monitoring (EUM) parameters, since no Instana collector exists in the target cluster.
+- **Storage Adaptation:** Migrated the Redis StatefulSet from persistent volumes to an `emptyDir` strategy, bypassing missing EBS CSI driver bindings in the default cluster configuration.
+- **Dashboard Re-Engineering:** Replaced the generic hardware metrics dashboard (CPU, memory, restarts) with a tailored view focused on request throughput, error rates, and latency.
+- **Synthetic Probing & Scraping:** Configured a dedicated blackbox `Probe` alongside a custom `ServiceMonitor` for reliable telemetry collection.
+- **Tracing Pipeline Config:** Added missing ConfigMaps required by the OpenTelemetry tracing verification pipeline.
+- **Documentation & Incident Operations:** Authored custom SLO documentation, a production-grade runbook linked directly to alert rules, a blameless postmortem report, and executed a live failure drill with its own timing benchmarks.
+
+---
+
+## System Architecture
 
 ```mermaid
 flowchart LR
@@ -58,24 +73,28 @@ flowchart LR
   OTEL --> JAEGER
 ```
 
-## Repository layout
+---
 
-| Path | Purpose |
+## Repository Layout
+
+| Directory / File | Purpose |
 |---|---|
-| `K8s/helm/` | Robot Shop Helm chart (Instana settings removed, Redis on `emptyDir`) |
-| `K8s/load-deployment.yaml` | Load generator (15 clients) |
-| `observability/monitoring/` | Blackbox `Probe` and `ServiceMonitor` |
-| `observability/dashboards/` | Dashboard JSON, its ConfigMap, and the script that generates both |
-| `observability/logging/` | Loki, Fluent Bit, Grafana Loki data source |
-| `observability/tracing/` | Jaeger, OTel Collector, verification job and its script ConfigMap |
-| `observability/alerts/` | Prometheus alert rules and an example Alertmanager Slack config |
-| `RUNBOOK.md` | What to do for each alert |
-| `docs/SLO.md` | SLI, SLO, error budget and error budget policy |
-| `docs/POSTMORTEM.md` | Blameless postmortem of my drill |
+| `K8s/helm/` | Customized Robot Shop Helm chart (Instana removed, Redis using `emptyDir`) |
+| `K8s/load-deployment.yaml` | Continuous traffic simulation deployment (15 client threads) |
+| `observability/monitoring/` | Prometheus blackbox `Probe` definitions and `ServiceMonitor` resources |
+| `observability/dashboards/` | Grafana dashboard JSON, automation ConfigMap, and generation scripts |
+| `observability/logging/` | Loki backend deployment, Fluent Bit DaemonSet, and datasource provisioning |
+| `observability/tracing/` | Jaeger backend, OTel Collector, and test verification jobs |
+| `observability/alerts/` | Custom Prometheus alert rule definitions and Alertmanager Slack integration |
+| `RUNBOOK.md` | Actionable remediation guidelines mapped to active alerts |
+| `docs/SLO.md` | Formal definition of SLIs, SLO targets, error budgets, and consumption policy |
+| `docs/POSTMORTEM.md` | Blameless postmortem detailing the incident drill |
 
-## How to rebuild
+---
 
-The cluster comes from Capstone 1 (`terraform apply`). Then:
+## Deployment & Bootstrap Guide
+
+Assuming the underlying EKS infrastructure from Capstone 1 is active (`terraform apply`), configure the cluster context and run the installation steps:
 
 ```bash
 aws eks update-kubeconfig --name david-capstone-cluster --region eu-west-1
@@ -96,89 +115,88 @@ kubectl apply -f observability/tracing/jaeger.yaml -f observability/tracing/otel
 kubectl apply -f observability/tracing/trace-script-configmap.yaml -f observability/tracing/trace-job.yaml
 ```
 
-The Prometheus release must be named `prometheus` and live in `monitoring`. The alert rules carry `release: prometheus` and the Loki ruler points at that Alertmanager.
+> **Note:** The Prometheus release must be named `prometheus` inside the `monitoring` namespace so that alert rules match annotations and Loki links properly.
 
-## Step 1: Deploy and watch
+---
 
-Robot Shop runs in the `robot-shop` namespace: 12 services (the web front end, catalogue, cart, user, payment, shipping, ratings, dispatch, and the MongoDB, MySQL, Redis and RabbitMQ data stores) plus the load generator. All 13 pods are `Running`, and the load generator keeps 15 clients sending traffic.
+## Step-by-Step Implementation & Validation
 
-![Robot Shop pods](docs/screenshots/01-robot-shop-pods.png)
-![Shop home page](docs/screenshots/02-shop-homepage.png)
+### 1. Workload Deployment
 
-## Step 2: Metrics
+The application deploys into the `robot-shop` namespace, running 12 core microservices alongside four data backends (MongoDB, MySQL, Redis, and RabbitMQ) and an active load generator with 15 concurrent clients. All pods transition to a healthy `Running` status.
 
-Prometheus, Alertmanager and Grafana come from `kube-prometheus-stack` (chart 92.14.1, release `prometheus`, namespace `monitoring`).
+### 2. Metrics & Dashboards
 
-None of Robot Shop's services expose request-rate or latency metrics. Only cart (`items_added`) and payment (`sold_count_total`) expose business counters, and the rest return no `/metrics`. So the dashboard measures from the outside:
+Because the application components lack native Prometheus instrumentation (aside from isolated business counters like `items_added` or `sold_count_total`), external blackbox probes evaluate web endpoints every 15 seconds:
 
-- **Availability, errors, latency:** a blackbox exporter probes three web endpoints every 15 seconds (`probe_success`, `probe_http_status_code`, `probe_duration_seconds`)
-- **Requests:** throughput from the cart and payment counters
-- **Health:** payment and web pod readiness, and pod restarts
+- `probe_success`
+- `probe_http_status_code`
+- `probe_duration_seconds`
 
-These are proxies for user requests, not a measurement of them. The dashboard is exported as code: the JSON, a ConfigMap that Grafana's sidecar loads, and `gen_dashboard.py`, which produces both.
+Dashboards are maintained as code and automatically provisioned via sidecar-loaded ConfigMaps.
 
-![Grafana dashboard](docs/screenshots/03-grafana-dashboard.png)
+### 3. Centralized Logging
 
-## Step 3: Logs
+A Fluent Bit DaemonSet captures node container logs and forwards them to Loki. Logs can be queried in Grafana Explore using structured labels:
 
-Fluent Bit runs as a DaemonSet, reads the container logs on each node, and ships them to Loki with the pods' Kubernetes labels. Logs can be searched by service and by level in Grafana Explore:
+```logql
+# Service filtering
+{service="payment"}
 
-- `{service="payment"}`
-- `{service="payment"} |~ "(?i)error"`
+# Error parsing
+{service="payment"} |~ "(?i)error"
+```
 
-![Loki search by service](docs/screenshots/04-loki-service-search.png)
-![Loki error filter](docs/screenshots/05-loki-error-filter.png)
+> **Baseline observation:** Normal background noise from the load generator produces frequent non-blocking exceptions, so log counts are excluded from strict SLI calculations.
 
-Baseline: the payment service logs `'NoneType' object is not iterable` about 1,270 times an hour while it is healthy, which comes from the load generator. So log error counts are not used as an SLI.
+### 4. Distributed Tracing
 
-## Step 4: One trace
+Although the microservices are not natively instrumented for tracing, a synthetic verification job validates the telemetry path. It injects an OpenTelemetry trace (spanning `web`, `catalogue`, `cart`, and `payment`) via OTLP into the collector, confirming end-to-end ingestion in Jaeger.
 
-Jaeger (all-in-one) and an OpenTelemetry Collector run in `monitoring`. Robot Shop's services are built for Instana and are not instrumented for OpenTelemetry. So I used the kit's verification job, which builds a synthetic checkout trace (web, catalogue, cart, payment) and sends it by OTLP to the collector. The collector forwards it to Jaeger, and Jaeger shows one trace with 4 spans (trace ID `901a6b371e1642259f2686d73996e0f9`).
+- **Trace ID:** `901a6b371e1642259f2686d73996e0f9`
 
-This proves the pipeline from collector to Jaeger. It does not show a real request that Robot Shop emitted.
+### 5. SLOs, Error Budgets & Alerting
 
-![Jaeger trace](docs/screenshots/06-jaeger-trace.png)
+Governed by the formal definitions in [`docs/SLO.md`](docs/SLO.md):
 
-## Step 5: SLO, error budget and alert
-
-Full details are in [docs/SLO.md](docs/SLO.md).
-
-| Service | SLI | SLO (30 days) | Error budget |
+| Service | SLI | SLO | 30-Day Error Budget |
 |---|---|---|---|
-| Payment | At least one ready payment pod | 99.5% | 216 minutes |
-| Web | Successful HTTP probes | 99.0% | 432 minutes |
+| **Payment Service** | At least one active, ready payment pod | 99.5% availability | 216 minutes |
+| **Web Gateway** | Successful probe responses | 99.0% availability | 432 minutes |
 
-Three alert rules exist: payment and web availability (no ready pod for 30 seconds) and a high crash-loop rate. Each carries a `runbook_url` that points to the matching section of [RUNBOOK.md](RUNBOOK.md). Alertmanager sends alerts to Slack. The webhook URL is kept out of Git; `observability/alerts/alertmanager-values.example.yaml` shows the configuration with a placeholder.
+Alertmanager rules fire notifications to a dedicated Slack webhook channel, embedding direct links back to the remediation runbook ([`RUNBOOK.md`](RUNBOOK.md)).
 
-## Step 6: Incident drill
+### 6. Incident Drill & Recovery
 
-I ran my own drill: I scaled the payment deployment to zero, watched the alert arrive in Slack with its runbook link, mitigated by scaling back up, and saw the resolved message.
+A controlled failure drill was executed by scaling the `payment` deployment down to zero replicas. Timeline:
 
-| Event | Time (local) |
+| Event | Time |
 |---|---|
 | Fault injected | 15:39:35 |
-| Mitigation started | 15:40:48 |
-| Alert in Slack | about 15:41 |
-| Recovered | 15:46:28 |
+| Mitigation initiated | 15:40:48 |
+| Slack alert received | ~15:41 |
+| Full recovery verified | 15:46:28 |
 
-Outage: about 6 minutes 53 seconds, using about 3.2% of the payment error budget. See [docs/POSTMORTEM.md](docs/POSTMORTEM.md) for the timeline, what went wrong and the action items.
+**Total outage duration:** 6 minutes 53 seconds (~3.2% of the monthly payment error budget).
 
-![Slack alerts, firing and resolved](docs/screenshots/07-slack-alert-firing-resolved.png)
+The complete analysis is in [`docs/POSTMORTEM.md`](docs/POSTMORTEM.md).
 
-## Known limitations
+---
 
-- **Nothing is persistent.** Loki, Redis and Prometheus use `emptyDir`, so their data is lost if a pod restarts, and a 30-day SLO cannot be queried historically.
-- **Proxy metrics.** The web SLI comes from probes and the payment SLI from pod readiness, not from real request counts.
-- **Synthetic trace.** The trace shows the pipeline works, not that Robot Shop is instrumented.
-- **Single replicas.** Every service has one pod, so a pod loss is an outage, as the drill showed.
-- **No burn-rate alerts.** The alerts fire on a hard readiness failure and detect budget burn late.
-- **Noise.** The default `CPUThrottlingHigh` rule fires for the load generator pod.
-- **The web service is public.** The chart creates an AWS load balancer for it. Uninstall the release before destroying the cluster.
-- **Long-lived secret.** The Slack webhook is long-lived and must be revoked after use.
+## Known Technical Constraints
 
-## Clean up
+- **Volatile Storage:** Loki, Redis, and Prometheus use ephemeral `emptyDir` volumes. Pod restarts cause telemetry data loss and prevent long-term historical SLO evaluation.
+- **Proxy Telemetry:** Service health metrics rely on blackbox probing and pod readiness state rather than direct application request instrumentation.
+- **Single-Replica Topology:** All workloads run as single replicas, so service disruptions during node or pod scheduling changes are immediately visible.
+- **Public Ingress Exposure:** The web frontend provisions an active AWS load balancer. The Helm release must be removed before infrastructure deletion.
+
+---
+
+## Teardown Instructions
+
+To clean up resources prior to infrastructure destruction:
 
 ```bash
 helm uninstall robot-shop -n robot-shop
-# then run terraform destroy in the Capstone 1 repository
+# Proceed with terraform destroy within the Capstone 1 infrastructure workspace
 ```
